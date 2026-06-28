@@ -1,0 +1,24 @@
+# sensors/flex.py
+# Flex sensor preprocessing for all 6 sensors.
+# Converts raw ADC readings → resistance → bend angle → normalized angle.
+
+import numpy as np
+import config
+
+def process_window_flex(adc: np.darray,r_bent,r_flat, theta_max)->np.ndarray:
+     #adc=window values taken 
+     # r_bent= the bent calibration for that specific value
+     # r_flat= the flat calibration for that specfic value 
+     # theta_max= max angle that can tilt
+     """ADC counts → ohms via voltage divider. shape (6,) → (6,)"""
+     adc_safe = np.clip(adc.astype(float), 1, 1022)
+     resistance = config.FLEX_PULLDOWN *(1023.0 / adc_safe - 1.0)
+
+     """Ohms → degrees via linear interpolation between calibrated endpoints."""
+     denom = np.where(np.abs(r_bent - r_flat) < 1.0, 1.0, r_bent - r_flat)
+     angle = (resistance - r_flat) / denom * theta_max
+
+     safe = np.where(theta_max < 1.0, 1.0, theta_max)
+     return np.clip(angle / safe, 0.0, 1.0)
+    
+

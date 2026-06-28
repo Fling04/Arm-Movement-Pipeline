@@ -1,0 +1,85 @@
+import struct
+import threading
+import serial
+import numpy as np
+from datetime import datetime
+from queues import raw_queue, RawFrame
+from config import PORT, BAUD, FLEX_COUNT
+
+FRAME_SIZE   = 48                # 4 + 12 + 12 + 20 bytes
+FRAME_FORMAT = '<I6f5f'          # uint32 + 6 floats + 5 floats
+
+
+class SerialLogger(threading.Thread):
+    def __init__(self, stop_event: threading.Event):
+        super().__init__(name="SerialLogger", daemon=True)
+        self.stop_event = stop_event
+        self.logfile    = open(
+            f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bin", 'wb'
+        )
+        self._buf = b''   # accumulation buffer for partial reads
+
+    def run(self):
+        try:
+            ser = serial.Serial(PORT, BAUD, timeout=1.0)
+            print(f"[SerialLogger] Connected on {PORT}")
+        except Exception as e:
+            print(f"[SerialLogger] Failed: {e}")
+            return
+
+        while not self.stop_event.is_set():
+            try:
+                # read whatever is available, accumulate
+                chunk = ser.read(ser.in_waiting or 1)
+                if not chunk:
+                    continue
+
+                self._buf += chunk
+
+                # process all complete frames in buffer
+                while len(self._buf) >= FRAME_SIZE:
+
+                    # skip diagnostic text lines (start with '#')
+                    if self._buf[0:1] == b'#':
+                        end = self._buf.find(b'\n')
+                        if end == -1:
+                            break   # wait for rest of line
+                        self._buf = self._buf[end + 1:]
+                        continue
+
+                    raw = self._buf[:FRAME_SIZE]
+                    self._buf = self._buf[FRAME_SIZE:]
+
+                    # log raw bytes
+                    self.logfile.write(raw)
+
+                    # unpack
+                    unpacked = struct.unpack(FRAME_FORMAT, raw)
+                    ts   = unpacked[0]
+                    acc  = np.array(unpacked[1:4],  dtype=np.float32)
+                    gyr  = np.array(unpacked[4:7],  dtype=np.float32)
+                    flex = np.array(unpacked[7:12], dtype=np.float32)
+
+                    # sanity check
+                    if np.any(np.isnan(acc)) or np.linalg.norm(acc) > 20.0:
+                        continue
+
+                    self._push(RawFrame(ts=ts, acc=acc, gyr=gyr, flex=flex))
+
+            except Exception as e:
+                print(f"[SerialLogger] {e}")
+
+        ser.close()
+        self.logfile.flush()
+        self.logfile.close()
+        print("[SerialLogger] Stopped")
+
+    def _push(self, frame: RawFrame):
+        try:
+            raw_queue.put_nowait(frame)
+        except Exception:
+            try:
+                raw_queue.get_nowait()
+                raw_queue.put_nowait(frame)
+            except Exception:
+                pass

@@ -1,0 +1,82 @@
+import threading
+import numpy as np
+from scipy.signal import butter, lfilter
+from queues import raw_queue, processed_queue, RawFrame, ProcessedFrame
+from config import IMU_HZ, FLEX_HZ, FLEX_COUNT, LP_CUTOFF_IMU, LP_CUTOFF_FLEX
+
+class LowPassFilter:
+    def __init__(self, cutoff_hz, sample_hz, channels):
+        nyq      = sample_hz / 2.0
+        b, a     = butter(2, cutoff_hz / nyq, btype='low')
+        self.b   = b
+        self.a   = a
+        self.zi  = [np.zeros(max(len(b), len(a)) - 1) for _ in range(channels)]
+        self.channels = channels
+
+    def update(self, x):
+        out = np.zeros_like(x)
+        for i in range(self.channels):
+            filtered, self.zi[i] = lfilter(self.b, self.a, [x[i]], zi=self.zi[i])
+            out[i] = filtered[0]
+        return out
+
+class Preprocessor(threading.Thread):
+
+
+    def __init__(self, stop_event: threading.Event):
+        super().__init__(name="Preprocessor", daemon=True)
+        self.stop_event  = stop_event
+        self.imu_filter  = LowPassFilter(LP_CUTOFF_IMU,  IMU_HZ,  3)
+        self.gyr_filter  = LowPassFilter(LP_CUTOFF_IMU,  IMU_HZ,  3)
+        self.flex_filter = LowPassFilter(LP_CUTOFF_FLEX, FLEX_HZ, FLEX_COUNT)
+        self.velocity    = np.zeros(3)
+        self.prev_gyr    = np.zeros(3)
+        self.prev_ts     = None
+
+    def run(self):
+        print("[Preprocessor] Running")
+        while not self.stop_event.is_set():
+            try:
+                frame: RawFrame = raw_queue.get(timeout=0.5)
+            except Exception:
+                continue
+
+
+            dt = (
+                (frame.ts - self.prev_ts) / 1e6
+                if self.prev_ts else 1.0 / IMU_HZ
+            )
+            self.prev_ts = frame.ts
+            dt = np.clip(dt, 1e-6, 0.1)
+
+            acc_f  = self.acc_filter.update(frame.acc)
+            gyr_f  = self.gyr_filter.update(frame.gyr)
+            flex_f = self.flex_filter.update(frame.flex)
+
+            # Remove gravity, integrate velocity
+            acc_lin       = acc_f.copy()
+            acc_lin[2]   -= 1.0
+            self.velocity += acc_lin * 9.81 * dt
+
+            acc_mag = float(np.linalg.norm(acc_f))
+            gyr_mag = float(np.linalg.norm(gyr_f))
+
+            # Decay velocity when still
+            if acc_mag < 0.05 and gyr_mag < 1.0:
+                self.velocity *= 0.95
+
+            gyr_delta     = gyr_f - self.prev_gyr
+            self.prev_gyr = gyr_f.copy()
+
+            processed_queue.put_nowait(ProcessedFrame(
+                ts        = frame.ts,
+                acc       = acc_f,
+                gyr       = gyr_f,
+                flex      = flex_f,
+                acc_mag   = acc_mag,
+                gyr_mag   = gyr_mag,
+                velocity  = self.velocity.copy(),
+                gyr_delta = gyr_delta,
+            ))
+
+        print("[Preprocessor] Stopped")

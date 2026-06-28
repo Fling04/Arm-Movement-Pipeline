@@ -1,0 +1,71 @@
+# sensors/imu.py
+# Parses BNO055 data from SD card JSON logs.
+# Handles gravity compensation, axis alignment, and calibration gating.
+
+import numpy as np
+import config
+
+def process_imu(samples: list[dict]) -> dict:
+    if len(samples) < 2:
+        return {}
+
+    acc = np.stack([s["linear_accel"] for s in samples])
+    gyro = np.stack([s["gyroscope"] for s in samples])
+    quat = quat / np.linalg.norm(quat, axis=1, keepdims=True)
+    quat = np.stack([s["quaternion"] for s in samples])
+
+    # timing
+    t0 = samples[0]["timestamp_ms"]
+    t1 = samples[-1]["timestamp_ms"]
+    dt = (t1 - t0) / 1000.0 / (len(samples) - 1)
+
+    # --- features ---
+    accel_mag = np.linalg.norm(acc, axis=1)
+    gyro_mag = np.linalg.norm(gyro, axis=1)
+
+    #jerk = np.diff(acc, axis=0) / dt
+    #set like this to control sensitivity i0.
+    # n a ligtht way 
+    jerk = (acc[2:] - acc[:-2]) / (2 * dt)
+    jerk_mag = np.linalg.norm(jerk, axis=1)
+
+    eulers = np.array([quaternion_to_euler(q) for q in quat])
+
+    return {
+        # FAST features (this is the key role of this file)
+        "acc_mean": np.mean(acc, axis=0),
+        "acc_std": np.std(acc, axis=0),
+
+        "motion_intensity": np.mean(accel_mag),
+        "motion_variability": np.std(accel_mag),
+
+        "jerk": np.mean(jerk_mag),
+
+        "rotation_intensity": np.mean(gyro_mag),
+
+        "orientation_mean": np.mean(eulers, axis=0),
+    }
+
+def quaternion_to_euler(q: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion [w, x, y, z] to Euler angles [roll, pitch, yaw] in degrees.
+    Uses ZYX convention (yaw-pitch-roll).
+    """
+    w, x, y, z = q
+
+    # roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    # pitch (y-axis rotation)
+    sinp = 2.0 * (w * y - z * x)
+    sinp = np.clip(sinp, -1.0, 1.0)
+    pitch = np.arcsin(sinp)
+
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+
+    return np.degrees(np.array([roll, pitch, yaw]))

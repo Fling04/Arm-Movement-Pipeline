@@ -1,0 +1,31 @@
+import queue
+import numpy as np
+from dataclasses import dataclass
+from typing import Optional
+from config import Q_RAW_MAX, Q_PROCESSED_MAX, Q_FEATURES_MAX
+
+@dataclass
+class RawFrame:
+    ts:   int
+    acc:  Optional[np.ndarray]   
+    gyr:  Optional[np.ndarray]   
+    flex: Optional[np.ndarray]  
+@dataclass
+class ProcessedFrame:
+    ts:        int
+    acc:       np.ndarray   
+    gyr:       np.ndarray   
+    flex:      np.ndarray   
+    acc_mag:   float
+    gyr_mag:   float
+    velocity:  np.ndarray   
+    gyr_delta: np.ndarray   
+
+@dataclass
+class FeatureVector:
+    ts:      int
+    vector:  np.ndarray    
+
+raw_queue       = queue.Queue(maxsize=Q_RAW_MAX)
+processed_queue = queue.Queue(maxsize=Q_PROCESSED_MAX)
+model_queue     = queue.Queue(maxsize=Q_FEATURES_MAX)

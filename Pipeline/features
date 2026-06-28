@@ -1,0 +1,61 @@
+import threading
+import numpy as np
+from collections import deque
+from queues import processed_queue, model_queue, ProcessedFrame, FeatureVector
+from config import WINDOW_SIZE, WINDOW_STRIDE
+
+class FeatureExtractor(threading.Thread):
+    """
+    Only job: accumulate ProcessedFrames into windows,
+    extract feature vectors, push to model_queue.
+    Knows nothing about serial or filtering.
+    """
+
+    def __init__(self, stop_event: threading.Event):
+        super().__init__(name="FeatureExtractor", daemon=True)
+        self.stop_event   = stop_event
+        self.window       = deque(maxlen=WINDOW_SIZE)
+        self.sample_count = 0
+
+    def run(self):
+        print("[FeatureExtractor] Running")
+        while not self.stop_event.is_set():
+            try:
+                frame: ProcessedFrame = processed_queue.get(timeout=0.5)
+            except Exception:
+                continue
+
+            self.window.append(frame)
+            self.sample_count += 1
+
+            if (self.sample_count % WINDOW_STRIDE == 0 and
+                    len(self.window) == WINDOW_SIZE):
+                fv = self._extract(list(self.window))
+                try:
+                    model_queue.put_nowait(fv)
+                except Exception:
+                    try:
+                        model_queue.get_nowait()
+                        model_queue.put_nowait(fv)
+                    except Exception:
+                        pass
+
+        print("[FeatureExtractor] Stopped")
+
+    def _extract(self, window) -> FeatureVector:
+        acc  = np.stack([f.acc     for f in window])   # (N, 3)
+        gyr  = np.stack([f.gyr     for f in window])   # (N, 3)
+        flex = np.stack([f.flex    for f in window])   # (N, 5)
+        amag = np.array([f.acc_mag for f in window])   # (N,)
+        gmag = np.array([f.gyr_mag for f in window])   # (N,)
+
+        vector = np.concatenate([
+            acc.mean(0),  acc.std(0),  np.abs(acc).max(0),   # 9
+            gyr.mean(0),  gyr.std(0),  np.abs(gyr).max(0),   # 9
+            [amag.mean(), amag.std(), gmag.mean(), gmag.std()],  # 4
+            flex.mean(0), flex.std(0),                        # 10
+            flex.max(0) - flex.min(0),                        # 5
+            flex[-1] - flex[0],                               # 5
+        ]).astype(np.float32)   # 42 total
+
+        return FeatureVector(ts=window[-1].ts, vector=vector)
