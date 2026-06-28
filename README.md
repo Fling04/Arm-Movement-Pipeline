@@ -1,6 +1,4 @@
 # Arm-Movement-Pipeline
-# Hand-Gesture-Classifier
-Hand Gesture Classifier for my capstone.
 
 # Gesture Recognition Pipeline for Prosthetic Control
 A data pipeline and machine learning system for classifying hand gestures using a sensor-instrumented glove, built as a foundation for prosthetic hand control.
